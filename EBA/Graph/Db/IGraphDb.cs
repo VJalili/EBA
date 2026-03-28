@@ -25,6 +25,13 @@ public interface IGraphDb<T> : IDisposable where T : GraphBase
         IReadOnlyList<Dictionary<string, object?>> updates,
         CancellationToken ct);
 
+    /// <summary>
+    /// Streams all Redeems edges, sets <c>SpentHeight</c> on the
+    /// matching Credits edge for each one, and returns per-block
+    /// spent-UTXO counts.
+    /// </summary>
+    public Task<Dictionary<long, long>> SetSpentHeightOnCreditsAsync(CancellationToken ct);
+
     public Task<List<IRecord>> GetRandomNodesAsync(
         NodeKind label,
         int count,

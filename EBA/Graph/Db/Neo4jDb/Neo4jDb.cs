@@ -295,4 +295,105 @@ public class Neo4jDb<T> : IGraphDb<T> where T : GraphBase
             "Completed bulk update of {total:n0} nodes with label {label}.",
             updates.Count, label);
     }
+
+    public async Task<Dictionary<long, long>> SetSpentHeightOnCreditsAsync(CancellationToken ct)
+    {
+        // blockHeight → number of UTXOs spent in that block
+        var utxoSpentPerBlock = new Dictionary<long, long>();
+
+        await VerifyConnectivityAsync(ct);
+
+        var batch = new List<Dictionary<string, object>>();
+        var chunkIndex = 0;
+        var totalProcessed = 0L;
+
+        // Stream every Redeems edge using an explicit read transaction
+        // so the cursor stays open while we flush write batches.
+        await using var readSession = _driver.AsyncSession(
+            o => o.WithDefaultAccessMode(AccessMode.Read));
+
+        var readTx = await readSession.BeginTransactionAsync();
+        try
+        {
+            var cursor = await readTx.RunAsync(
+                "MATCH ()-[r:Redeems]->() " +
+                "RETURN r.Txid AS txid, r.Vout AS vout, r.SpentHeight AS height");
+
+            while (await cursor.FetchAsync())
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var record = cursor.Current;
+                var height = record["height"].As<long>();
+                /* temp
+                ref var count = ref CollectionsMarshal.GetValueRefOrAddDefault(
+                    utxoSpentPerBlock, height, out _);
+                count++;*/
+
+                batch.Add(new Dictionary<string, object>
+                {
+                    ["txid"] = record["txid"].As<string>(),
+                    ["vout"] = record["vout"].As<int>(),
+                    ["height"] = height
+                });
+
+                if (batch.Count >= _options.Neo4j.MaxEntitiesPerBatch)
+                {
+                    await FlushCreditsSpentHeightAsync(batch, chunkIndex++, ct);
+                    totalProcessed += batch.Count;
+                    batch = [];
+                }
+            }
+
+            await readTx.CommitAsync();
+        }
+        catch
+        {
+            await readTx.RollbackAsync();
+            throw;
+        }
+
+        if (batch.Count > 0)
+        {
+            await FlushCreditsSpentHeightAsync(batch, chunkIndex, ct);
+            totalProcessed += batch.Count;
+        }
+
+        _logger.LogInformation(
+            "Completed setting SpentHeight on Credits for {total:n0} Redeems edges " +
+            "across {blocks:n0} distinct block heights.",
+            totalProcessed, utxoSpentPerBlock.Count);
+
+        return utxoSpentPerBlock;
+    }
+
+    private async Task FlushCreditsSpentHeightAsync(
+        IReadOnlyList<Dictionary<string, object>> batch,
+        int chunkIndex,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        await using var writeSession = _driver.AsyncSession(
+            o => o.WithDefaultAccessMode(AccessMode.Write));
+
+        var summary = await writeSession.ExecuteWriteAsync(async tx =>
+        {
+            var cursor = await tx.RunAsync(
+                "UNWIND $batch AS row " +
+                "MATCH (t:Tx {Txid: row.txid})-[c:Credits]->() " +
+                "WHERE c.Vout = row.vout " +
+                "SET c.SpentHeight = row.height",
+                new Dictionary<string, object> { ["batch"] = batch });
+            return await cursor.ConsumeAsync();
+        });
+
+        var counters = summary.Counters;
+        if (counters.PropertiesSet == 0)
+            _logger.LogWarning("Chunk {chunk}: 0 properties set on Credits edges.",
+                chunkIndex);
+        else
+            _logger.LogInformation("Chunk {chunk}: set {props:n0} properties on Credits edges.",
+                chunkIndex, counters.PropertiesSet);
+    }
 }

@@ -49,7 +49,7 @@ public class BitcoinGraphAgent : IGraphAgent<BitcoinGraph>, IDisposable
     public async Task PostProcessAsync(CancellationToken ct)
     {
         var postProcess = new PostProcess(_options, _db, _logger);
-        await postProcess.Run();
+        await postProcess.Run(ct);
     }
 
     public void Dispose()
