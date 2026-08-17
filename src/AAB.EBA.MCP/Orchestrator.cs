@@ -18,7 +18,8 @@ public class Orchestrator : IDisposable
 
     public async Task<int> InvokeAsync(string[] args)
     {
-        var options = new Options();
+        var options = new Options() { WorkingDir = Path.GetTempPath() };
+
         var host = await SetupAndGetHostAsync(options);
 
         await host.RunAsync(_cT);
